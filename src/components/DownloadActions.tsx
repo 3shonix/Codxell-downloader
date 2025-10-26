@@ -86,7 +86,6 @@ export default function DownloadSection({
               className="w-full py-3 bg-green-700 hover:bg-green-600 text-white rounded-lg font-medium text-sm transition-colors border border-green-600 flex items-center justify-center gap-2"
             >
               <Download size={18} />
-              {console.log(status.download_type,downloadType)}
               {(status.download_type || downloadType) === 'audio'
                 ? 'Download Audio (MP3)'
                 : 'Download Video'}
