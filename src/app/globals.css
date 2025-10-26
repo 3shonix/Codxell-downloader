@@ -11,6 +11,15 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Hide scrollbars beautifully */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 button,
 a {
   cursor: pointer;

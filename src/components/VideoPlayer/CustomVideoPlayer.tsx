@@ -83,19 +83,22 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
     return (
         <div
             ref={containerRef}
-            className="relative w-full bg-black rounded-xl overflow-hidden group"
+            className="relative bg-black rounded-xl overflow-hidden group 
+             mx-auto max-w-[720px] w-full flex justify-center items-center"
             onMouseEnter={() => setHover(true)}
             onMouseLeave={() => setHover(false)}
         >
+
             <video
                 ref={videoRef}
                 poster={poster}
-                className="w-full h-full max-h-[75vh] object-contain"
+                className="max-w-full max-h-[80vh] object-contain mx-auto"
                 playsInline
                 preload="metadata"
                 controls={false}
                 onClick={togglePlay}
             />
+
 
             {/* Loading Spinner */}
             <AnimatePresence>

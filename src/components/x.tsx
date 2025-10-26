@@ -208,11 +208,11 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
     return (
         <div
             ref={containerRef}
-            className="relative w-full bg-black rounded-xl overflow-hidden group"
+            className="relative w-full bg-black rounded-xl overflow-hidden group h-full"
             style={{
                 aspectRatio: 'auto',
                 minHeight: '200px',
-                maxHeight: '65vh'
+                height: 'full',
             }}
             onMouseEnter={() => setHover(true)}
             onMouseLeave={() => setHover(false)}
@@ -273,11 +273,12 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
             {/* Video Controls */}
             <motion.div
                 initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: hover || !playing ? 1 : 0, y: hover || !playing ? 0 : 20 }}
+                animate={{ opacity: hover || !playing ? 1 : 1, y: 0 }} // always visible
                 transition={{ duration: 0.25, ease: "easeOut" }}
-                className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black via-black/80 to-transparent px-4 pb-3 pt-12 pointer-events-none"
+                className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black via-black/80 to-transparent px-4 pb-3 pt-12"
                 onClick={(e) => e.stopPropagation()}
             >
+
                 <div className="pointer-events-auto">
                     {/* Progress Bar */}
                     <div
