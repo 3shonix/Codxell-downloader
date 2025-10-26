@@ -10,3 +10,22 @@ body {
   color: white !important;
   font-family: Arial, Helvetica, sans-serif;
 }
+
+button,
+a {
+  cursor: pointer;
+}
+
+.cod {
+  transform: translate(-50%, -50%);
+  top: 50%;
+  left: 50%;
+  position: absolute;
+  letter-spacing: -30px;
+  font-size: 45vw;
+  pointer-events: none;
+  user-select: none;
+  color: rgba(100, 100, 100, 0.5);
+  font-family: "Oswald";
+  z-index: -2;
+}
