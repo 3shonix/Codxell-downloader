@@ -208,11 +208,11 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
     return (
         <div
             ref={containerRef}
-            className="relative w-full bg-black rounded-xl overflow-hidden group h-full"
+            className="relative w-full bg-black rounded-xl overflow-hidden group"
             style={{
-                aspectRatio: 'auto',
+                aspectRatio: '16/9',
+                maxHeight: '60vh',
                 minHeight: '200px',
-                height: 'full',
             }}
             onMouseEnter={() => setHover(true)}
             onMouseLeave={() => setHover(false)}
@@ -221,7 +221,7 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
                 ref={videoRef}
                 src={src}
                 poster={poster}
-                className="w-full h-full max-h-[85vh] object-contain cursor-pointer mx-auto"
+                className="w-full h-full object-contain cursor-pointer"
                 playsInline
 
                 controls={false}

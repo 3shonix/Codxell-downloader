@@ -26,6 +26,16 @@ download_cancel_flags = {}
 executor = ThreadPoolExecutor(max_workers=4)
 
 
+QUALITY_MAP = {
+    '1080p': {'width': 1920, 'height': 1080, 'label': 'Full HD'},
+    '720p': {'width': 1280, 'height': 720, 'label': 'HD'},
+    '480p': {'width': 854, 'height': 480, 'label': 'SD'},
+    '360p': {'width': 640, 'height': 360, 'label': 'Low'},
+    '240p': {'width': 426, 'height': 240, 'label': 'Very Low'},
+    '144p': {'width': 256, 'height': 144, 'label': 'Minimum'},
+}
+
+
 def get_download_path(platform):
     path = os.path.join(DOWNLOADS_DIR, platform)
     os.makedirs(path, exist_ok=True)
@@ -204,7 +214,7 @@ def start_download():
         data = request.get_json() or {}
         url = data.get("url", "").strip()
         platform = data.get("platform", "").lower()
-        quality = data.get("quality", "highest").lower()
+        quality = data.get("quality", "1080p").lower()
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
@@ -225,6 +235,7 @@ def start_download():
             "progress": 0,
             "message": "Initializing download...",
             "platform": platform,
+            "quality": quality,
         }
         emit_status(download_id)
         download_cancel_flags.pop(download_id, None)
@@ -237,6 +248,41 @@ def start_download():
         logger.error(e)
         return jsonify({"error": str(e)}), 500
 
+def resize_with_ffmpeg(input_path, output_path, quality):
+    """Resize video/image using FFmpeg to specified quality"""
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        raise Exception("FFmpeg not found")
+
+    if quality not in QUALITY_MAP:
+        quality = '1080p'
+
+    target = QUALITY_MAP[quality]
+    width, height = target['width'], target['height']
+
+    # Detect if video or image
+    probe_cmd = [ffmpeg_path, "-i", input_path, "-hide_banner"]
+    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+    is_video = 'Video:' in probe_result.stderr
+
+    if is_video:
+        cmd = [
+            ffmpeg_path, "-i", input_path,
+            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "copy", "-y", output_path
+        ]
+    else:
+        cmd = [
+            ffmpeg_path, "-i", input_path,
+            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            "-q:v", "2", "-y", output_path
+        ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise Exception(f"Resize failed: {result.stderr}")
+    return True
 
 @app.route("/api/preview", methods=["POST"])
 def preview():
@@ -255,16 +301,15 @@ def preview():
         else:
             return jsonify({"error": "Unsupported URL"}), 400
 
+        # Define all available qualities (universal for all platforms)
+        all_qualities = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p']
+
         # YOUTUBE
         if platform == "youtube":
             yt = YouTube(url)
             video_streams = yt.streams.filter(file_extension="mp4", only_video=True)
             progressive = yt.streams.filter(progressive=True, file_extension="mp4")
-            qualities = [s.resolution for s in video_streams if s.resolution]
-            prog_qualities = [s.resolution for s in progressive if s.resolution]
-            all_qualities = sorted(list(set(qualities + prog_qualities)), reverse=True)
-
-            # Try to find a progressive stream first (video + audio combined)
+            
             progressive_stream = (
                 yt.streams.filter(progressive=True, file_extension="mp4")
                 .order_by("resolution")
@@ -273,11 +318,9 @@ def preview():
             )
 
             if progressive_stream:
-                # This one includes both audio and video
                 best_video = progressive_stream
                 best_audio = None
             else:
-                # Fallback: separate video and audio streams
                 best_video = (
                     yt.streams.filter(file_extension="mp4", only_video=True)
                     .order_by("resolution")
@@ -304,15 +347,9 @@ def preview():
                     "available_qualities": all_qualities,
                     "duration": yt.length,
                     "author": yt.author,
-                    "ux_tip": (
-                        "🎥 YouTube HD/4K video detected • Audio included in preview"
-                        if progressive_stream
-                        else "🎥 Adaptive video preview (no sound)"
-                    ),
+                    "ux_tip": "🎥 All quality options available with FFmpeg conversion",
                 }
             )
-
-        # Replace the INSTAGRAM section in the /api/preview endpoint with this updated version:
 
         # INSTAGRAM
         if platform == "instagram":
@@ -321,10 +358,9 @@ def preview():
                 return jsonify({"error": "Invalid Instagram link"}), 400
 
             media_items = []
-            title = "Instagram Post"  # Default fallback
+            title = "Instagram Post"
             author = None
 
-            # Method 1: Try Instaloader first
             try:
                 L = instaloader.Instaloader(
                     download_pictures=False,
@@ -334,17 +370,13 @@ def preview():
                 )
                 post = instaloader.Post.from_shortcode(L.context, shortcode)
 
-                # Extract caption (title)
                 if hasattr(post, "caption") and post.caption:
                     caption = str(post.caption).strip()
-                    # Limit to first 100 characters for preview
                     title = caption[:100] + ("..." if len(caption) > 100 else "")
 
-                # Extract author
                 if hasattr(post, "owner_username"):
                     author = post.owner_username
 
-                # Try to get sidecar (carousel) posts
                 nodes = []
                 try:
                     if hasattr(post, "get_sidecar_nodes"):
@@ -356,7 +388,6 @@ def preview():
                 except:
                     pass
 
-                # Process nodes
                 if nodes:
                     for node in nodes:
                         is_video = getattr(node, "is_video", False)
@@ -383,7 +414,6 @@ def preview():
                                     }
                                 )
                 else:
-                    # Single post
                     if getattr(post, "is_video", False):
                         media_items.append(
                             {
@@ -403,7 +433,6 @@ def preview():
             except Exception as e:
                 logger.warning(f"Instaloader failed: {e}")
 
-            # Method 2: Fallback to web scraping
             if not media_items:
                 try:
                     headers = {
@@ -412,7 +441,6 @@ def preview():
                         "Accept-Language": "en-US,en;q=0.9",
                     }
 
-                    # Try embed URL
                     embed_url = (
                         f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
                     )
@@ -421,7 +449,6 @@ def preview():
                     if response.status_code == 200:
                         html = response.text
 
-                        # Extract caption from HTML if Instaloader didn't get it
                         if title == "Instagram Post":
                             caption_patterns = [
                                 r'"caption":"([^"]{1,200})',
@@ -436,7 +463,6 @@ def preview():
                                         "Instagram",
                                         "Instagram Post",
                                     ]:
-                                        # Clean up escaped characters
                                         caption = caption.replace("\\n", " ").replace(
                                             "\\", ""
                                         )
@@ -445,7 +471,6 @@ def preview():
                                         )
                                         break
 
-                        # Extract username if not found
                         if not author:
                             username_patterns = [
                                 r'"username":"([^"]+)"',
@@ -457,7 +482,6 @@ def preview():
                                     author = match.group(1)
                                     break
 
-                        # Extract video URL
                         video_patterns = [
                             r'"video_url":"(https://[^"]+)"',
                             r'"video_url":\s*"(https://[^"]+)"',
@@ -479,7 +503,6 @@ def preview():
                                 )
                                 break
 
-                        # Extract images
                         if not media_items:
                             img_patterns = [
                                 r'"display_url":"(https://[^"]+)"',
@@ -487,7 +510,7 @@ def preview():
                             ]
                             for pattern in img_patterns:
                                 matches = re.findall(pattern, html)
-                                for img_url in matches[:5]:  # Limit to 5 images
+                                for img_url in matches[:5]:
                                     clean_url = img_url.replace("\\u0026", "&").replace(
                                         "\\/", "/"
                                     )
@@ -520,8 +543,8 @@ def preview():
                     "media": media_items,
                     "thumbnail": media_items[0].get("thumbnail")
                     or media_items[0]["url"],
-                    "available_qualities": ["1080p"],
-                    "ux_tip": f"📱 Instagram Post with {len(media_items)} media file(s)",
+                    "available_qualities": all_qualities,
+                    "ux_tip": f"📱 Instagram Post • All qualities available with conversion",
                 }
             )
 
@@ -594,10 +617,8 @@ def preview():
                         "media": media_items,
                         "thumbnail": media_items[0].get("thumbnail")
                         or media_items[0]["url"],
-                        "available_qualities": (
-                            ["1080p", "720p"] if video_url else ["original"]
-                        ),
-                        "ux_tip": f"📌 Pinterest {'Video' if video_url else 'Image'}",
+                        "available_qualities": all_qualities,
+                        "ux_tip": f"📌 Pinterest • All qualities available with conversion",
                     }
                 )
 
@@ -608,7 +629,6 @@ def preview():
     except Exception as ex:
         logger.exception("Preview error")
         return jsonify({"error": f"Preview failed: {str(ex)}"}), 500
-
 
 @app.route("/downloads/<platform>/<path:filename>")
 def serve_platform_file(platform, filename):
@@ -757,13 +777,13 @@ def proxy_video():
 
 def process_download(download_id, url, platform, quality):
     try:
-        smooth_emit_progress(download_id, 5, "Preparing download...")
+        smooth_emit_progress(download_id, 5, f"Preparing download at {quality}...")
         if platform == "youtube":
             download_youtube(download_id, url, quality)
         elif platform == "instagram":
-            download_instagram(download_id, url)
+            download_instagram(download_id, url, quality)
         elif platform == "pinterest":
-            download_pinterest(download_id, url)
+            download_pinterest(download_id, url, quality)
         else:
             raise Exception("Unsupported platform")
     except Exception as e:
@@ -881,7 +901,7 @@ def download_stream_fast(
     return False
 
 
-def download_youtube(download_id, url, quality):
+def download_youtube(download_id, url, quality='1080p'):
     try:
         if download_cancel_flags.get(download_id):
             return
@@ -929,20 +949,28 @@ def download_youtube(download_id, url, quality):
             tmp_audio = filepath + ".audio.tmp"
 
             try:
-                download_sessions[download_id][
-                    "message"
-                ] = "Downloading video stream..."
+                download_sessions[download_id]["message"] = "Downloading video stream..."
                 emit_status(download_id)
                 download_stream_fast(video_stream.url, tmp_video, download_id, 15, 40)
 
-                download_sessions[download_id][
-                    "message"
-                ] = "Downloading audio stream..."
+                download_sessions[download_id]["message"] = "Downloading audio stream..."
                 emit_status(download_id)
                 download_stream_fast(audio_stream.url, tmp_audio, download_id, 40, 65)
 
                 smooth_emit_progress(download_id, 70, "Merging audio and video...")
                 merge_video_audio_fast(tmp_video, tmp_audio, filepath)
+
+                # ✅ NEW: Apply quality conversion if needed
+                if quality and quality in QUALITY_MAP:
+                    smooth_emit_progress(download_id, 75, f"Converting to {quality}...")
+                    converted_file = filepath.replace(".mp4", f"_{quality}.mp4")
+                    try:
+                        resize_with_ffmpeg(filepath, converted_file, quality)
+                        os.remove(filepath)
+                        filepath = converted_file
+                        filename = os.path.basename(converted_file)
+                    except Exception as e:
+                        logger.warning(f"Quality conversion failed, keeping original: {e}")
 
                 # Convert audio to MP3
                 smooth_emit_progress(download_id, 80, "Creating audio-only MP3...")
@@ -950,16 +978,9 @@ def download_youtube(download_id, url, quality):
                 if ffmpeg_path:
                     try:
                         cmd = [
-                            ffmpeg_path,
-                            "-i",
-                            tmp_audio,
-                            "-vn",
-                            "-acodec",
-                            "libmp3lame",
-                            "-q:a",
-                            "2",
-                            "-y",
-                            audio_filepath,
+                            ffmpeg_path, "-i", tmp_audio,
+                            "-vn", "-acodec", "libmp3lame",
+                            "-q:a", "2", "-y", audio_filepath,
                         ]
                         subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     except Exception as e:
@@ -971,11 +992,21 @@ def download_youtube(download_id, url, quality):
                         try:
                             os.remove(tmp_file)
                         except Exception as e:
-                            logger.warning(
-                                f"Failed to remove temp file {tmp_file}: {e}"
-                            )
+                            logger.warning(f"Failed to remove temp file {tmp_file}: {e}")
         else:
-            download_stream_fast(stream.url, filepath, download_id, 15, 95)
+            download_stream_fast(stream.url, filepath, download_id, 15, 85)
+            
+            # ✅ NEW: Apply quality conversion for progressive streams
+            if quality and quality in QUALITY_MAP:
+                smooth_emit_progress(download_id, 90, f"Converting to {quality}...")
+                converted_file = filepath.replace(".mp4", f"_{quality}.mp4")
+                try:
+                    resize_with_ffmpeg(filepath, converted_file, quality)
+                    os.remove(filepath)
+                    filepath = converted_file
+                    filename = os.path.basename(converted_file)
+                except Exception as e:
+                    logger.warning(f"Quality conversion failed, keeping original: {e}")
 
         # Prepare response with both video and audio links
         response_data = {
@@ -1001,17 +1032,11 @@ def download_youtube(download_id, url, quality):
         logger.exception("YouTube download error")
 
         if "Connection" in error_msg or "10054" in error_msg:
-            error_msg = (
-                "Download interrupted. The connection was unstable. Please try again."
-            )
+            error_msg = "Download interrupted. The connection was unstable. Please try again."
         elif "timeout" in error_msg.lower():
-            error_msg = (
-                "Download timed out. Please check your connection and try again."
-            )
+            error_msg = "Download timed out. Please check your connection and try again."
         elif "No suitable" in error_msg:
-            error_msg = (
-                f"Requested quality ({quality}) not available. Try a different quality."
-            )
+            error_msg = f"Requested quality ({quality}) not available. Try a different quality."
         elif "FFmpeg" in error_msg:
             error_msg += "\n\nPlease install FFmpeg to merge video and audio streams."
 
@@ -1019,7 +1044,7 @@ def download_youtube(download_id, url, quality):
         emit_status(download_id)
 
 
-def download_instagram(download_id, url):
+def download_instagram(download_id, url, quality='1080p'):
     try:
         shortcode = extract_shortcode(url)
         if not shortcode:
@@ -1056,37 +1081,29 @@ def download_instagram(download_id, url):
                     if is_video:
                         video_url = getattr(node, "video_url", None)
                         if video_url:
-                            media_urls.append(
-                                {
-                                    "url": str(video_url).replace("\\u0026", "&"),
-                                    "is_video": True,
-                                }
-                            )
+                            media_urls.append({
+                                "url": str(video_url).replace("\\u0026", "&"),
+                                "is_video": True,
+                            })
                     else:
                         img_url = getattr(node, "display_url", None)
                         if img_url:
-                            media_urls.append(
-                                {
-                                    "url": str(img_url).replace("\\u0026", "&"),
-                                    "is_video": False,
-                                }
-                            )
+                            media_urls.append({
+                                "url": str(img_url).replace("\\u0026", "&"),
+                                "is_video": False,
+                            })
             else:
                 # Single post
                 if getattr(post, "is_video", False):
-                    media_urls.append(
-                        {
-                            "url": str(post.video_url).replace("\\u0026", "&"),
-                            "is_video": True,
-                        }
-                    )
+                    media_urls.append({
+                        "url": str(post.video_url).replace("\\u0026", "&"),
+                        "is_video": True,
+                    })
                 else:
-                    media_urls.append(
-                        {
-                            "url": str(post.url).replace("\\u0026", "&"),
-                            "is_video": False,
-                        }
-                    )
+                    media_urls.append({
+                        "url": str(post.url).replace("\\u0026", "&"),
+                        "is_video": False,
+                    })
 
         except Exception as insta_error:
             logger.warning(f"Instaloader failed: {insta_error}, using fallback...")
@@ -1113,9 +1130,7 @@ def download_instagram(download_id, url):
                 for pattern in video_patterns:
                     match = re.search(pattern, html)
                     if match:
-                        video_url = (
-                            match.group(1).replace("\\u0026", "&").replace("\\/", "/")
-                        )
+                        video_url = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
                         media_urls.append({"url": video_url, "is_video": True})
                         break
 
@@ -1128,9 +1143,7 @@ def download_instagram(download_id, url):
                     for pattern in img_patterns:
                         matches = re.findall(pattern, html)
                         for img_url in matches[:10]:
-                            clean_url = img_url.replace("\\u0026", "&").replace(
-                                "\\/", "/"
-                            )
+                            clean_url = img_url.replace("\\u0026", "&").replace("\\/", "/")
                             if clean_url not in [m["url"] for m in media_urls]:
                                 media_urls.append({"url": clean_url, "is_video": False})
 
@@ -1138,9 +1151,7 @@ def download_instagram(download_id, url):
                 logger.error(f"Web scraping fallback failed: {e}")
 
         if not media_urls:
-            raise Exception(
-                "No media URLs found. The post might be private or unavailable."
-            )
+            raise Exception("No media URLs found. The post might be private or unavailable.")
 
         total = len(media_urls)
         logger.info(f"Found {total} media items to download")
@@ -1158,13 +1169,28 @@ def download_instagram(download_id, url):
                 filepath = os.path.join(save_path, filename)
 
                 download_stream_fast(
-                    media_url,
-                    filepath,
-                    download_id,
-                    10 + int((idx - 1) / total * 80),
-                    10 + int(idx / total * 80),
+                    media_url, filepath, download_id,
+                    10 + int((idx - 1) / total * 70),
+                    10 + int(idx / total * 70),
                     max_retries=3,
                 )
+
+                # ✅ NEW: Apply quality conversion if needed
+                if quality and quality in QUALITY_MAP:
+                    converted_file = filepath.replace(ext, f"_{quality}{ext}")
+                    try:
+                        logger.info(f"Converting {filename} to {quality}...")
+                        smooth_emit_progress(
+                            download_id,
+                            70 + int(idx / total * 20),
+                            f"Converting to {quality}..."
+                        )
+                        resize_with_ffmpeg(filepath, converted_file, quality)
+                        os.remove(filepath)
+                        filepath = converted_file
+                        filename = os.path.basename(converted_file)
+                    except Exception as e:
+                        logger.warning(f"Quality conversion failed for {filename}, keeping original: {e}")
 
                 logger.info(f"Downloaded: {filename}")
                 return filename
@@ -1194,14 +1220,12 @@ def download_instagram(download_id, url):
             raise Exception("No files were downloaded successfully")
 
         smooth_emit_progress(download_id, 100, "Completed ✅")
-        download_sessions[download_id].update(
-            {
-                "status": "completed",
-                "filename": files[0],
-                "downloaded_files": files,
-                "message": f"Downloaded {len(files)} file(s)",
-            }
-        )
+        download_sessions[download_id].update({
+            "status": "completed",
+            "filename": files[0],
+            "downloaded_files": files,
+            "message": f"Downloaded {len(files)} file(s) at {quality}",
+        })
         emit_status(download_id)
 
     except Exception as e:
@@ -1210,7 +1234,7 @@ def download_instagram(download_id, url):
         emit_status(download_id)
 
 
-def download_pinterest(download_id, url):
+def download_pinterest(download_id, url, quality='1080p'):
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1228,22 +1252,19 @@ def download_pinterest(download_id, url):
         media_url = None
 
         if video_url:
-            # It's a video post
             media_url = video_url
             ext = ".mp4"
         else:
             # It's an image post - get the highest quality image
             main_image_patterns = [
-                r'"images":\{"orig":\{"url":"([^"]+)"',  # Original quality
-                r'"url":"(https://i\.pinimg\.com/originals/[^"]+)"',  # Originals path
+                r'"images":\{"orig":\{"url":"([^"]+)"',
+                r'"url":"(https://i\.pinimg\.com/originals/[^"]+)"',
             ]
 
             for pattern in main_image_patterns:
                 match = re.search(pattern, html)
                 if match:
-                    media_url = (
-                        match.group(1).replace("\\u0026", "&").replace("\\/", "/")
-                    )
+                    media_url = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
                     break
 
             ext = ".jpg"
@@ -1251,27 +1272,38 @@ def download_pinterest(download_id, url):
         if not media_url:
             raise Exception("No media found for this Pinterest post")
 
-        # Download single file only
+        # Download single file
         filename = sanitize_filename("pinterest_post") + ext
         filepath = os.path.join(save_path, filename)
 
-        download_stream_fast(media_url, filepath, download_id, 10, 95)
+        download_stream_fast(media_url, filepath, download_id, 10, 80)
+
+        # ✅ NEW: Apply quality conversion if needed
+        if quality and quality in QUALITY_MAP:
+            smooth_emit_progress(download_id, 85, f"Converting to {quality}...")
+            converted_file = filepath.replace(ext, f"_{quality}{ext}")
+            try:
+                resize_with_ffmpeg(filepath, converted_file, quality)
+                os.remove(filepath)
+                filepath = converted_file
+                filename = os.path.basename(converted_file)
+            except Exception as e:
+                logger.warning(f"Quality conversion failed, keeping original: {e}")
 
         smooth_emit_progress(download_id, 100, "Completed ✅")
-        download_sessions[download_id].update(
-            {
-                "status": "completed",
-                "filename": filename,
-                "downloaded_files": [filename],
-                "message": "Download completed!",
-            }
-        )
+        download_sessions[download_id].update({
+            "status": "completed",
+            "filename": filename,
+            "downloaded_files": [filename],
+            "message": f"Download completed at {quality}!",
+        })
         emit_status(download_id)
 
     except Exception as e:
         logger.exception("Pinterest download error")
         download_sessions[download_id] = {"status": "error", "message": str(e)}
         emit_status(download_id)
+
 
 
 @app.route("/api/download-zip")

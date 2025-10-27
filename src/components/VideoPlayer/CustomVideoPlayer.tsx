@@ -84,7 +84,12 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
         <div
             ref={containerRef}
             className="relative bg-black rounded-xl overflow-hidden group 
-             mx-auto max-w-[720px] w-full flex justify-center items-center"
+             mx-auto w-full flex justify-center items-center"
+            style={{
+                aspectRatio: '16/9',
+                maxHeight: '200px',
+                height: '200px',
+            }}
             onMouseEnter={() => setHover(true)}
             onMouseLeave={() => setHover(false)}
         >
@@ -92,7 +97,7 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
             <video
                 ref={videoRef}
                 poster={poster}
-                className="max-w-full max-h-[80vh] object-contain mx-auto"
+                className="w-full h-full object-contain"
                 playsInline
                 preload="metadata"
                 controls={false}
