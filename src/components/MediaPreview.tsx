@@ -56,17 +56,16 @@ export default function MediaPreview({ media, backend, limit = 6 }: MediaPreview
   };
 
   return (
-    <section className="relative w-full flex flex-col flex-1 p-6 items-center justify-center overflow-hidden">
+    <section className="relative w-full max-h-full flex flex-col flex-1 items-center justify-center overflow-hidden">
       {/* Media Grid */}
       <div
         ref={containerRef}
-        className={`w-full flex-1 transition-all duration-500 ${
-          media.length === 1
+        className={`w-full flex-1 transition-all duration-500 ${media.length === 1
             ? 'flex justify-center items-center'
             : hasVideos
               ? 'grid grid-cols-1 sm:grid-cols-2'
               : 'grid grid-cols-2 sm:grid-cols-3'
-        } ${expanded ? 'max-h-full overflow-hidden' : ''}`}
+          } ${expanded ? 'max-h-full overflow-hidden' : 'max-h-full'}`}
       >
         <AnimatePresence>
           {visibleMedia.map((item, i) => (
@@ -76,11 +75,11 @@ export default function MediaPreview({ media, backend, limit = 6 }: MediaPreview
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               transition={{ duration: 0.25, delay: i * 0.04 }}
-              className="relative w-full bg-zinc-900/70 border border-zinc-800 rounded-xl overflow-hidden group hover:border-zinc-700 transition-all duration-300"
+              className="relative w-full h-full bg-zinc-900/70 rounded-xl overflow-hidden group transition-all duration-300"
             >
               {/* Media Container with Fixed Aspect Ratio */}
-              <div className="relative w-full aspect-[16/9] bg-black rounded-t-xl overflow-hidden max-h-[200px]">
-                
+              <div className="relative w-full aspect-[16/9] bg-black rounded-t-xl overflow-hidden max-h-[full] h-full">
+
                 {/* Loading State */}
                 {loadingStates[i] && (
                   <div className="absolute inset-0 flex items-center justify-center bg-zinc-900">
@@ -113,35 +112,33 @@ export default function MediaPreview({ media, backend, limit = 6 }: MediaPreview
                     />
                   </div>
                 ) : (
-                  <img
-                    src={`${backend}/api/proxy-image?url=${encodeURIComponent(item.url)}`}
-                    alt={`Media ${i + 1}`}
-                    className="absolute inset-0 w-full h-full object-contain transition-transform duration-300 group-hover:scale-105"
-                    loading="lazy"
-                    onLoad={() => handleImageLoad(i)}
-                    onError={() => handleImageError(i)}
-                  />
+                  <div className="relative w-full h-full">
+                    <img
+                      src={`${backend}/api/proxy-image?url=${encodeURIComponent(item.url)}`}
+                      alt={`Media ${i + 1}`}
+                      className="absolute inset-0 w-full h-full object-cover blur-sm transition-transform duration-300 opacity-50 group-hover:scale-105"
+                      loading="lazy"
+                      onLoad={() => handleImageLoad(i)}
+                      onError={() => handleImageError(i)}
+                    />
+                    <img
+                      src={`${backend}/api/proxy-image?url=${encodeURIComponent(item.url)}`}
+                      alt={`Media ${i + 1}`}
+                      className="absolute inset-0 w-full h-full object-contain"
+                      loading="lazy"
+                      onLoad={() => handleImageLoad(i)}
+                      onError={() => handleImageError(i)}
+                    />
+                  </div>
                 )}
 
                 {/* Media Type Badge */}
                 <div className="absolute top-2 right-2">
-                  <div className={`px-2 py-1 rounded-md text-xs font-medium ${
-                    item.type === 'video' 
-                      ? 'bg-red-900/80 text-red-300 border border-red-800' 
+                  <div className={`px-2 py-1 rounded-md text-xs font-medium ${item.type === 'video'
+                      ? 'bg-red-900/80 text-red-300 border border-red-800'
                       : 'bg-blue-900/80 text-blue-300 border border-blue-800'
-                  }`}>
+                    }`}>
                     {item.type === 'video' ? 'Video' : 'Image'}
-                  </div>
-                </div>
-
-                {/* Hover Overlay */}
-                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all duration-300 flex items-center justify-center opacity-0 group-hover:opacity-100">
-                  <div className="bg-white/10 backdrop-blur-sm rounded-full p-2">
-                    {item.type === 'video' ? (
-                      <div className="w-6 h-6 text-white font-bold">Play</div>
-                    ) : (
-                      <div className="w-6 h-6 text-white font-bold">View</div>
-                    )}
                   </div>
                 </div>
               </div>
@@ -181,12 +178,12 @@ export default function MediaPreview({ media, backend, limit = 6 }: MediaPreview
       )}
 
       {/* Media Count Info */}
-      <div className="mt-4 text-center">
+      {/* <div className="mt-4 text-center">
         <p className="text-xs text-zinc-500">
-          {media.length} {media.length === 1 ? 'item' : 'items'} 
+          {media.length} {media.length === 1 ? 'item' : 'items'}
           {hasVideos && media.some(m => m.type === 'image') && ' • Mixed media'}
         </p>
-      </div>
+      </div> */}
     </section>
   );
 }

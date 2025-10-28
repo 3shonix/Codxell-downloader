@@ -208,11 +208,9 @@ export default function CustomVideoPlayer({ src, poster }: { src: string; poster
     return (
         <div
             ref={containerRef}
-            className="relative w-full bg-black rounded-xl overflow-hidden group"
+            className="relative w-full bg-black rounded-xl overflow-hidden group max-h-[full] h-full"
             style={{
                 aspectRatio: '16/9',
-                maxHeight: '60vh',
-                minHeight: '200px',
             }}
             onMouseEnter={() => setHover(true)}
             onMouseLeave={() => setHover(false)}

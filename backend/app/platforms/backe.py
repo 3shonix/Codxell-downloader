@@ -1,5 +1,6 @@
-# OLDDD
-from numbers import Number
+NEW
+
+
 from urllib.parse import quote_plus, unquote_plus
 from flask import Flask, request, jsonify, Response, stream_with_context, send_file
 from flask_cors import CORS
@@ -10,6 +11,9 @@ from pytubefix import YouTube
 import instaloader
 from concurrent.futures import ThreadPoolExecutor
 import io
+
+# Lock for thread-safe socket emissions
+socket_lock = threading.Lock()
 
 app = Flask(__name__)
 CORS(app)
@@ -29,6 +33,7 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 
 QUALITY_MAP = {
+    'none': {'width': None, 'height': None, 'label': 'Original'},
     '1080p': {'width': 1920, 'height': 1080, 'label': 'Full HD'},
     '720p': {'width': 1280, 'height': 720, 'label': 'HD'},
     '480p': {'width': 854, 'height': 480, 'label': 'SD'},
@@ -143,14 +148,30 @@ def merge_video_audio_fast(video_path, audio_path, output_path):
         raise Exception(f"FFmpeg merge failed: {e}")
 
 
-def emit_status(download_id):
-    session = download_sessions.get(download_id)
-    if session:
-        socketio.emit(
-            "download_update",
-            {"download_id": download_id, "session": session},
-            room=download_id,
-        )
+def emit_status(download_id, rate_limit=0.1):
+    """Thread-safe socket emission with error handling and rate limiting"""
+    try:
+        session = download_sessions.get(download_id)
+        if session:
+            current_time = time.time()
+            last_emit = session.get("_last_emit_time", 0)
+            
+            # Rate limit emissions to prevent socket overload
+            if current_time - last_emit < rate_limit:
+                return
+                
+            session["_last_emit_time"] = current_time
+            
+            with socket_lock:
+                socketio.emit(
+                    "download_update",
+                    {"download_id": download_id, "session": session},
+                    room=download_id,
+                    skip_sid=None,
+                    ignore_queue=False,
+                )
+    except Exception as e:
+        logger.warning(f"Failed to emit status for {download_id}: {e}")
 
 
 @socketio.on("connect")
@@ -209,14 +230,6 @@ def health():
         }
     )
 
-import subprocess
-   # Add to QUALITY_MAP or create a new one for audio
-AUDIO_QUALITY_MAP = {
-       '320k': '320k',
-       '256k': '256k',
-       '192k': '192k',
-       '128k': '128k',
-}
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
@@ -236,7 +249,6 @@ def start_download():
                 platform = "instagram"
             elif "pinterest" in url:
                 platform = "pinterest"
-                
             else:
                 return jsonify({"error": "Unsupported platform"}), 400
 
@@ -247,6 +259,13 @@ def start_download():
             "message": "Initializing download...",
             "platform": platform,
             "quality": quality,
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "current_speed": 0,
+            "eta_seconds": None,
+            "download_start_time": None,
+            "last_update_time": None,
+            "last_bytes_downloaded": 0,
         }
         emit_status(download_id)
         download_cancel_flags.pop(download_id, None)
@@ -260,7 +279,6 @@ def start_download():
         return jsonify({"error": str(e)}), 500
 
 def resize_with_ffmpeg(input_path, output_path, quality):
-    """Resize video/image using FFmpeg to specified quality"""
     ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
         raise Exception("FFmpeg not found")
@@ -269,30 +287,68 @@ def resize_with_ffmpeg(input_path, output_path, quality):
         quality = '1080p'
 
     target = QUALITY_MAP[quality]
-    width, height = target['width'], target['height']
+    width, height = target.get('width'), target.get('height')
 
-    # Detect if video or image
-    probe_cmd = [ffmpeg_path, "-i", input_path, "-hide_banner"]
-    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
-    is_video = 'Video:' in probe_result.stderr
+    # None = keep original
+    if width is None or height is None:
+        shutil.copyfile(input_path, output_path)
+        return True
+
+    # Check if video or image
+    is_video = is_video_file(ffmpeg_path, input_path)
 
     if is_video:
+        # Video quality scale
+        # Higher quality = lower CRF number (18=high, 28=low)
+        crf_map = {
+            "2160p": "18",
+            "1440p": "20",
+            "1080p": "22",
+            "720p": "25",
+            "480p": "28",
+            "360p": "30"
+        }
+        crf = crf_map.get(quality, "23")
+
         cmd = [
-            ffmpeg_path, "-i", input_path,
+            ffmpeg_path, "-y", "-i", input_path,
             "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
-            "-c:a", "copy", "-y", output_path
-        ]
-    else:
-        cmd = [
-            ffmpeg_path, "-i", input_path,
-            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-            "-q:v", "2", "-y", output_path
+            "-c:v", "libx264", "-preset", "medium", "-crf", crf,
+            "-c:a", "aac", "-b:a", "128k", output_path
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    else:
+        # Image compression mapping
+        # Smaller quality = larger qscale (more compression)
+        q_map = {
+            "2160p": "2",
+            "1440p": "4",
+            "1080p": "6",
+            "720p": "8",
+            "480p": "10",
+            "360p": "12"
+        }
+        q = q_map.get(quality, "6")
+
+        # Ensure output format matches extension
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in [".png"]:
+            codec = "png"
+        elif ext in [".webp"]:
+            codec = "libwebp"
+        else:
+            codec = "mjpeg"  # default for .jpg/.jpeg
+
+        cmd = [
+            ffmpeg_path, "-y", "-i", input_path,
+            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            "-q:v", q, "-c:v", codec, output_path
+        ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise Exception(f"Resize failed: {result.stderr}")
+
     return True
 
 @app.route("/api/preview", methods=["POST"])
@@ -313,7 +369,7 @@ def preview():
             return jsonify({"error": "Unsupported URL"}), 400
 
         # Define all available qualities (universal for all platforms)
-        all_qualities = ['none','1080p', '720p', '480p', '360p', '240p', '144p']
+        all_qualities = ['none', '1080p', '720p', '480p', '360p', '240p', '144p']
 
         # YOUTUBE
         if platform == "youtube":
@@ -425,24 +481,21 @@ def preview():
                                     }
                                 )
                 else:
-                        if getattr(post, "is_video", False):
-                            duration = getattr(post, "video_duration", None)
-                            media_items.append(
-                                {
-                                    "type": "video",
-                                    "url": str(post.video_url).replace("\\u0026", "&"),
-                                    "thumbnail": str(post.url),
-                                    "duration": duration,  # <-- added here
-                                }
-                            )
-                        else:
-                            media_items.append(
-                                {
-                                    "type": "image",
-                                    "url": str(post.url).replace("\\u0026", "&"),
-                                }
-    )
-
+                    if getattr(post, "is_video", False):
+                        media_items.append(
+                            {
+                                "type": "video",
+                                "url": str(post.video_url).replace("\\u0026", "&"),
+                                "thumbnail": str(post.url),
+                            }
+                        )
+                    else:
+                        media_items.append(
+                            {
+                                "type": "image",
+                                "url": str(post.url).replace("\\u0026", "&"),
+                            }
+                        )
 
             except Exception as e:
                 logger.warning(f"Instaloader failed: {e}")
@@ -497,26 +550,25 @@ def preview():
                                     break
 
                         video_patterns = [
-                        r'"video_url":"(https://[^"]+)"',
-                    ]
-                    duration_pattern = r'"video_duration":([0-9.]+)'
-                    duration_match = re.search(duration_pattern, html)
-                    duration = Number(duration_match.group(1)) if duration_match else 'not available'
-
-                    for pattern in video_patterns:
-                        match = re.search(pattern, html)
-                        if match:
-                            video_url = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
-                            media_items.append(
-                                {
-                                    "type": "video",
-                                    "url": video_url,
-                                    "thumbnail": None,
-                                    "duration": duration,  # <-- added
-                                }
-                            )
-                            break
-
+                            r'"video_url":"(https://[^"]+)"',
+                            r'"video_url":\s*"(https://[^"]+)"',
+                        ]
+                        for pattern in video_patterns:
+                            match = re.search(pattern, html)
+                            if match:
+                                video_url = (
+                                    match.group(1)
+                                    .replace("\\u0026", "&")
+                                    .replace("\\/", "/")
+                                )
+                                media_items.append(
+                                    {
+                                        "type": "video",
+                                        "url": video_url,
+                                        "thumbnail": None,
+                                    }
+                                )
+                                break
 
                         if not media_items:
                             img_patterns = [
@@ -555,7 +607,6 @@ def preview():
                     "platform": "instagram",
                     "title": title,
                     "author": f"@{author}" if author else None,
-                    "duration": duration,
                     "media": media_items,
                     "thumbnail": media_items[0].get("thumbnail")
                     or media_items[0]["url"],
@@ -564,7 +615,6 @@ def preview():
                 }
             )
 
-        # PINTEREST
         # PINTEREST
         if platform == "pinterest":
             try:
@@ -580,20 +630,10 @@ def preview():
                 media_items = []
                 video_url = extract_video_url(html)
 
-                # Try to extract video duration (milliseconds → seconds)
-                duration = None
-                try:
-                    duration_match = re.search(r'"duration":\s*([0-9]+)', html)
-                    if duration_match:
-                        duration = int(duration_match.group(1)) / 1000.0
-                except Exception:
-                    duration = None
-
                 if video_url:
-                    # Extract thumbnail
                     thumbnail_match = re.search(r'"thumbnailUrl":"([^"]+)"', html)
                     thumbnail = (
-                        thumbnail_match.group(1).replace("\\u0026", "&").replace("\\/", "/")
+                        thumbnail_match.group(1).replace("\\u0026", "&")
                         if thumbnail_match
                         else ""
                     )
@@ -601,14 +641,11 @@ def preview():
                     media_items.append(
                         {
                             "type": "video",
-                            "url": video_url.replace("\\u0026", "&").replace("\\/", "/"),
+                            "url": video_url.replace("\\u0026", "&"),
                             "thumbnail": thumbnail,
-                            "duration": duration,  # ✅ Added duration here
                         }
                     )
-
                 else:
-                    # Fallback: extract main image
                     main_image_patterns = [
                         r'"images":\{"orig":\{"url":"([^"]+)"',
                         r'"url":"(https://i\.pinimg\.com/originals/[^"]+)"',
@@ -625,7 +662,6 @@ def preview():
                             media_items.append({"type": "image", "url": img_url})
                             break
 
-                # Extract title
                 title_patterns = [
                     r'"title":"([^"]{1,200})',
                     r'"description":"([^"]{1,200})',
@@ -646,18 +682,16 @@ def preview():
                         "platform": "pinterest",
                         "title": title,
                         "media": media_items,
-                        "duration": duration,  # ✅ Added top-level duration too
                         "thumbnail": media_items[0].get("thumbnail")
                         or media_items[0]["url"],
                         "available_qualities": all_qualities,
-                        "ux_tip": "📌 Pinterest • All qualities available with conversion",
+                        "ux_tip": f"📌 Pinterest • All qualities available with conversion",
                     }
                 )
 
             except Exception as e:
                 logger.exception("Pinterest preview failed")
                 return jsonify({"error": f"Pinterest preview failed: {str(e)}"}), 500
-
 
     except Exception as ex:
         logger.exception("Preview error")
@@ -978,6 +1012,15 @@ def download_stream_fast(
 
     return False
 
+def is_video_file(ffmpeg_path, input_path):
+    try:
+        probe_cmd = [ffmpeg_path, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                     "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", input_path]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=5)
+        return "video" in result.stdout.lower()
+    except:
+        return False
+
 
 def download_youtube(download_id, url, quality='1080p'):
     try:
@@ -1039,16 +1082,17 @@ def download_youtube(download_id, url, quality='1080p'):
                 merge_video_audio_fast(tmp_video, tmp_audio, filepath)
 
                 # ✅ NEW: Apply quality conversion if needed
-                if quality and quality in QUALITY_MAP:
-                    smooth_emit_progress(download_id, 75, f"Converting to {quality}...")
-                    converted_file = filepath.replace(".mp4", f"_{quality}.mp4")
+                if quality and quality in QUALITY_MAP and quality != 'none':
+                    ext = os.path.splitext(filepath)[1]  # Get file extension
+                    converted_file = filepath.replace(ext, f"_{quality}{ext}")
                     try:
                         resize_with_ffmpeg(filepath, converted_file, quality)
                         os.remove(filepath)
                         filepath = converted_file
                         filename = os.path.basename(converted_file)
                     except Exception as e:
-                        logger.warning(f"Quality conversion failed, keeping original: {e}")
+                        logger.warning(f"Quality conversion failed for {filename}, keeping original: {e}")
+
 
                 # Convert audio to MP3
                 smooth_emit_progress(download_id, 80, "Creating audio-only MP3...")
@@ -1858,6 +1902,13 @@ def download_audio_only():
             "progress": 0,
             "message": "Extracting audio...",
             "platform": platform,
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "current_speed": 0,
+            "eta_seconds": None,
+            "download_start_time": None,
+            "last_update_time": None,
+            "last_bytes_downloaded": 0,
         }
         emit_status(download_id)
         download_cancel_flags.pop(download_id, None)
@@ -2092,4 +2143,4 @@ if __name__ == "__main__":
         )
         logger.warning("Install FFmpeg: https://ffmpeg.org/download.html")
 
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True)
